@@ -19,6 +19,8 @@
  */
 package com.buransky.plugins.scoverage.sensor
 
+import java.io.File
+
 import com.buransky.plugins.scoverage.language.Scala
 import com.buransky.plugins.scoverage.measure.ScalaMetrics
 import com.buransky.plugins.scoverage.pathcleaner.{BruteForceSequenceMatcher, PathSanitizer}
@@ -48,20 +50,45 @@ class ScoverageSensor(settings: Settings, pathResolver: PathResolver, fileSystem
 
   override def shouldExecuteOnProject(project: Project): Boolean = fileSystem.languages().contains(Scala.key)
 
+  private lazy val getScalaSourceDirectory = {
+    def containsScalaCode(file: File): Boolean = {
+      containsFileWithSuffix(".scala")(file)
+    }
+
+    def getFileTree(f: File): Stream[File] = f #:: Option(f.listFiles()).toStream.flatten.flatMap(getFileTree)
+    def endsWith(suffix: String)(file: File): Boolean = file.exists && file.getPath.endsWith(suffix)
+    def containsFileWithSuffix(suffix: String)(f: File): Boolean =
+    getFileTree(f).exists(endsWith(suffix))
+
+    val srcOption = Option(settings.getString("sonar.sources"))
+    val defaultPath = "src/main/scala"
+    val sonarSources = srcOption match {
+      case Some(src) => {
+        src.split(",").find { first =>
+          val sourceDir = new File(fileSystem.baseDir(), first)
+          containsScalaCode(sourceDir)
+        } match {
+          case Some(path) => path
+          case None =>
+            log.warn(s"could not find Scala source directory among options $src.")
+            defaultPath
+        }
+      }
+      case None => {
+        log.warn(s"could not find settings key sonar.sources assuming src/main/scala.")
+        defaultPath
+      }
+    }
+
+    sonarSources
+  }
+
   override def analyse(project: Project, context: SensorContext) {
     scoverageReportPath match {
       case Some(reportPath) =>
         // Single-module project
-        val srcOption = Option(settings.getString("sonar.sources"))
-        val sonarSources = srcOption match {
-          case Some(src) => src
-          case None => {
-            log.warn(s"could not find settings key sonar.sources assuming src/main/scala.")
-            "src/main/scala"
-          }
-        }
-        val pathSanitizer = createPathSanitizer(sonarSources)
-        processProject(scoverageReportParser.parse(reportPath, pathSanitizer), project, context, sonarSources)
+        val pathSanitizer = createPathSanitizer(getScalaSourceDirectory)
+        processProject(scoverageReportParser.parse(reportPath, pathSanitizer), project, context, getScalaSourceDirectory)
 
       case None =>
         // Multi-module project has report path set for each module individually
@@ -139,6 +166,7 @@ class ScoverageSensor(settings: Settings, pathResolver: PathResolver, fileSystem
   }
 
   private def processProject(projectCoverage: ProjectStatementCoverage, project: Project, context: SensorContext, sonarSources: String) {
+    log.info(s"Processing project with sonarSources=$sonarSources")
     // Save measures
     saveMeasures(context, project, projectCoverage)
 
